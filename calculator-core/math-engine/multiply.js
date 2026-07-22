@@ -2,7 +2,15 @@ function multiply(a,b){
     if (typeof a !== 'number' || !Number.isFinite(a) || typeof b !== 'number' || !Number.isFinite(b)) {
         throw new Error('Invalid operand: not a finite number');
     }
-    return a*b;
+    // Guard the RESULT domain: two finite operands can still overflow to a
+    // non-finite value (e.g. multiply(Number.MAX_VALUE, 2) === Infinity).
+    // Surface it as an explicit, facade-compatible error rather than silently
+    // returning Infinity/-Infinity/NaN (never return an invalid result).
+    const result = a*b;
+    if (!Number.isFinite(result)) {
+        throw new Error('Result is not a finite number');
+    }
+    return result;
 }
 
 module.exports = multiply;
