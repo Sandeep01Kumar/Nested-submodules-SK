@@ -7,9 +7,17 @@ body {
     color: #212121;
 }
 
+/* Form controls (buttons, inputs) do NOT inherit font-family from their ancestors
+   by default — the user agent gives them a platform default (e.g. Arial), which reads
+   as a different typeface from the app's system-ui stack set on <body>/.calculator
+   (INFO#2 visual-cohesion finding). `font-family: inherit` ties every button (operator
+   keypad, =, Clear History) to that surrounding stack. font-family ONLY — never the
+   `font` shorthand — so the explicit font-size/font-weight on .op-btn/#equals/#clear-history
+   are preserved. */
 button {
     width:50px;
     height:40px;
+    font-family: inherit;
 }
 
 /* Calculator layout: controls on the left, history panel on the right, with clear visual separation. Hand-authored, framework-free CSS (zero third-party deps). */
@@ -40,6 +48,9 @@ button {
     width: 100px;
     padding: 6px 8px;
     font-size: 1rem;
+    /* Inherit the app's system-ui stack rather than the UA default (INFO#2);
+       font-family only, so the explicit font-size above is preserved. */
+    font-family: inherit;
     border: 1px solid #cccccc;
     border-radius: 4px;
 }
