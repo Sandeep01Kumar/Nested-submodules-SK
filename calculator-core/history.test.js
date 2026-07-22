@@ -11,12 +11,14 @@
  * third-party framework. Run it with the built-in runner:
  *
  *     node --test                                   # run the whole suite from the repo root
+ *     node --test calculator-core/                  # run the whole calculator-core suite
  *     node --test calculator-core/history.test.js   # run just this file
  *
- * (Note: `node --test calculator-core/` — a bare directory argument — is NOT a
- * valid invocation on this runtime; Node tries to load the directory as a
- * module and fails with MODULE_NOT_FOUND. Use the repo-root form above, or pass
- * explicit test files / a glob such as `node --test "calculator-core/**\/*.test.js"`.)
+ * (Note: the bare directory form `node --test calculator-core/` works because
+ * calculator-core/package.json sets "main":"index.js" and calculator-core/index.js
+ * is a directory-resolvable entry point that requires every *.test.js module; on
+ * this runtime (Node v22) Node resolves the directory to that entry point and so
+ * runs the full suite. See calculator-core/index.js.)
  *
  * Isolation note: history.js keeps its entries in a MODULE-LEVEL SINGLETON
  * array that is shared by every require('./history') within the same Node
@@ -294,4 +296,101 @@ test('mutation isolation: mutating the caller-supplied Date after record does no
     t.setUTCFullYear(1900); // mutate the caller's original Date after recording
 
     assert.equal(history.getAll()[0].timestamp.getUTCFullYear(), 2020);
+});
+
+// Case 16 (F2) — record() enforces the finite-primitive-number result model:
+// every non-number and every non-finite number is REJECTED with a TypeError and
+// is NOT coerced. This is the documented data model (history.js §3) and closes
+// the input-integrity gap where a mutable/invalid result could enter the store.
+test('record rejects any result that is not a finite primitive number (no coercion)', () => {
+    const invalidResults = [
+        { label: 'object', value: { amount: 1 } },
+        { label: 'array', value: [1, 2, 3] },
+        { label: 'NaN', value: NaN },
+        { label: 'Infinity', value: Infinity },
+        { label: '-Infinity', value: -Infinity },
+        { label: 'undefined', value: undefined },
+        { label: 'missing (no result key)', value: undefined, omit: true },
+        { label: 'null', value: null },
+        { label: 'numeric string', value: '5' },
+        { label: 'boolean', value: true },
+        // A boxed Number is an OBJECT, not a primitive — it must be rejected so
+        // the stored value stays a true primitive that snapshot() copies by value.
+        { label: 'boxed Number object', value: new Number(5) }
+    ];
+
+    for (const c of invalidResults) {
+        const entry = c.omit ? { expression: 'x' } : { expression: 'x', result: c.value };
+        assert.throws(
+            () => history.record(entry),
+            TypeError,
+            'expected a TypeError for result type: ' + c.label
+        );
+    }
+
+    // A valid finite primitive number (including 0, a negative, and a float) is
+    // still accepted unchanged — backward compatibility for the normal path.
+    for (const good of [0, -7, 3.5, 42]) {
+        const stored = history.record({ expression: 'ok', result: good });
+        assert.equal(stored.result, good);
+    }
+});
+
+// Case 17 (F2) — a rejected record() has ZERO side effects: the store is not
+// mutated at all when the result is invalid (nothing is pushed).
+test('record rejection has zero side effects on the store', () => {
+    history.record({ expression: 'seed', result: 1 });
+    const before = history.getAll().length; // 1
+
+    for (const bad of [{ amount: 1 }, NaN, Infinity, undefined, '5', null, true]) {
+        assert.throws(() => history.record({ expression: 'bad', result: bad }), TypeError);
+    }
+
+    // The store is unchanged — no partial/invalid entry leaked in.
+    const after = history.getAll();
+    assert.equal(after.length, before);
+    assert.equal(after[0].expression, 'seed');
+    assert.equal(after[0].result, 1);
+});
+
+// Case 18 (F2) — the exact reproduction from the review: a mutable object result
+// must NOT be able to corrupt shared history. Because such a result is rejected
+// outright, the store never holds a shared reference, so mutating the caller's
+// object afterward changes no later getAll() read.
+test('record does not leak a mutable object result into the store', () => {
+    const mutable = { amount: 1 };
+    assert.throws(() => history.record({ expression: '7 % 3', result: mutable }), TypeError);
+
+    // Record a subsequent VALID entry, then mutate the earlier rejected object.
+    history.record({ expression: '2 + 3', result: 5 });
+    mutable.amount = 2;
+    mutable.amount = 3;
+
+    // The valid entry's result is unaffected and remains a finite primitive.
+    const all = history.getAll();
+    assert.equal(all.length, 1);
+    assert.equal(all[0].result, 5);
+    assert.equal(typeof all[0].result, 'number');
+});
+
+// Case 19 (F6) — an INVALID Date timestamp (getTime() is NaN) never enters the
+// store: it defaults to a fresh valid Date, so callers/UI never see "Invalid
+// Date". A VALID supplied Date is still preserved (deep-cloned by instant).
+test('record defaults an invalid Date timestamp to a valid Date, and preserves a valid one', () => {
+    const before = Date.now();
+    const stored = history.record({ expression: 'bad ts', result: 1, timestamp: new Date('not-a-date') });
+    const after = Date.now();
+
+    // The stored timestamp is a real, finite instant (NOT an Invalid Date)...
+    assert.ok(stored.timestamp instanceof Date);
+    assert.ok(Number.isFinite(stored.timestamp.getTime()));
+    // ...captured at record time (between before/after).
+    assert.ok(stored.timestamp.getTime() >= before && stored.timestamp.getTime() <= after);
+
+    // A valid supplied Date is still honored (preserved by instant, deep-cloned).
+    history.clear();
+    const t = new Date('2021-03-04T05:06:07.000Z');
+    const rec = history.record({ expression: 'good ts', result: 2, timestamp: t });
+    assert.equal(rec.timestamp.getTime(), t.getTime());
+    assert.notStrictEqual(rec.timestamp, t);
 });

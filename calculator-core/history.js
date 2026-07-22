@@ -64,14 +64,17 @@
      * Build a frozen, deep-cloned snapshot of a stored entry for hand-off to
      * callers. The returned object is a NEW plain object carrying a NEW Date
      * (cloned from the stored Date's instant), then Object.freeze()d. This is
-     * the single choke point that guarantees mutation isolation (finding F6):
+     * the single choke point that guarantees mutation isolation (findings F2/F6):
      * mutating a returned entry — including calling setUTCFullYear() on its
      * timestamp — can never reach the internal store, and every call yields an
-     * independent copy.
+     * independent copy. `expression` (a string) and `result` are copied by
+     * value; that is fully isolating because record() guarantees `result` is a
+     * finite PRIMITIVE number (finding F2), so there is no shared object
+     * reference to leak, and `timestamp` is re-cloned as a fresh Date.
      *
-     * @param {{ expression: string, result: *, timestamp: Date }} entry
+     * @param {{ expression: string, result: number, timestamp: Date }} entry
      *        An internally-stored entry.
-     * @returns {Readonly<{ expression: string, result: *, timestamp: Date }>}
+     * @returns {Readonly<{ expression: string, result: number, timestamp: Date }>}
      *          A frozen, independent snapshot.
      */
     function snapshot(entry) {
@@ -90,34 +93,64 @@
      * fully decoupling the stored entry from the caller's object:
      *   - `expression` is coerced to a string via String(...); a missing /
      *     undefined expression becomes the empty string ''.
-     *   - `result` is stored exactly as provided (as-is, no coercion).
-     *   - `timestamp` is DEEP-CLONED when the caller supplies a Date instance
-     *     (a new Date of the same instant is stored, so later mutation of the
-     *     caller's Date cannot reach the store); otherwise it defaults to
-     *     `new Date()` captured at record time.
+     *   - `result` MUST be a finite primitive number — the documented entry data
+     *     model (history.js §3, AAP §0.2.3). A non-number, or a non-finite
+     *     number (NaN / Infinity / -Infinity), is REJECTED with a TypeError; it
+     *     is never coerced and never stored (finding F2). Enforcing a finite
+     *     PRIMITIVE here is also what makes the store's mutation isolation real:
+     *     snapshot() copies `result` by value, which is safe only for a
+     *     primitive — a non-primitive result (e.g. `{ amount: 1 }`) would
+     *     otherwise be shared by reference and let a later caller-side mutation
+     *     corrupt earlier reads.
+     *   - `timestamp` is DEEP-CLONED when the caller supplies a VALID Date
+     *     instance (one whose getTime() is finite): a new Date of the same
+     *     instant is stored, so later mutation of the caller's Date cannot reach
+     *     the store. A missing timestamp — or a supplied but INVALID Date whose
+     *     getTime() is NaN (e.g. `new Date('not-a-date')`) — defaults to
+     *     `new Date()` captured at record time, so an "Invalid Date" can never
+     *     enter the store (finding F6).
      *
      * The return value is a frozen, deep-cloned snapshot of the stored entry
      * (see snapshot()), NOT the internal object — so mutating it (including its
      * timestamp) cannot corrupt the store (finding F6).
      *
-     * @param {{ expression?: *, result?: *, timestamp?: Date }} entry
-     *        The calculation to record.
+     * @param {{ expression?: *, result: number, timestamp?: Date }} entry
+     *        The calculation to record. `result` is required and must be a
+     *        finite primitive number.
      * @returns {Readonly<{ expression: string, result: number, timestamp: Date }>}
      *          A frozen, deep-cloned snapshot of the stored entry.
-     * @throws {TypeError} If `entry` is null or not an object.
+     * @throws {TypeError} If `entry` is null or not an object, or if
+     *         `entry.result` is not a finite primitive number (finding F2).
      */
     function record(entry) {
         if (entry === null || typeof entry !== 'object') {
             throw new TypeError('history.record requires an entry object');
         }
 
-        // Store a NEW private object. A caller-supplied Date is deep-cloned (a
-        // fresh Date of the same instant) so that later mutation of the caller's
-        // own Date instance cannot reach into the store.
+        // Enforce the documented result model (history.js §3): a finite PRIMITIVE
+        // number. Reject — never coerce — anything else (an object/array, a
+        // string, a boolean, null, undefined, or a non-finite NaN/Infinity)
+        // BEFORE mutating the store, so an invalid or mutable result can never be
+        // pushed and can never reach getAll()/list() or the UI (finding F2). The
+        // `typeof` guard also rejects a boxed `new Number(1)` object, keeping the
+        // stored value a true primitive that snapshot() can safely copy by value.
+        if (typeof entry.result !== 'number' || !Number.isFinite(entry.result)) {
+            throw new TypeError('history.record requires a finite number result');
+        }
+
+        // A caller-supplied Date is accepted only when it represents a real
+        // instant (getTime() is finite); an INVALID Date (getTime() is NaN) is
+        // treated like an absent timestamp and defaults to now, so "Invalid Date"
+        // never enters the store (finding F6).
+        var hasValidDate = entry.timestamp instanceof Date && Number.isFinite(entry.timestamp.getTime());
+
+        // Store a NEW private object. A valid caller-supplied Date is deep-cloned
+        // (a fresh Date of the same instant) so that later mutation of the
+        // caller's own Date instance cannot reach into the store.
         var stored = {
             expression: entry.expression === undefined ? '' : String(entry.expression),
             result: entry.result,
-            timestamp: entry.timestamp instanceof Date ? new Date(entry.timestamp.getTime()) : new Date()
+            timestamp: hasValidDate ? new Date(entry.timestamp.getTime()) : new Date()
         };
 
         entries.push(stored);

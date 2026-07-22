@@ -13,12 +13,14 @@
  * third-party framework. Run it with the built-in runner, e.g.:
  *
  *     node --test                                     # whole suite from repo root
+ *     node --test calculator-core/                     # whole calculator-core suite
  *     node --test calculator-core/calculator.test.js  # just this file
  *
- * (Note: a bare directory argument such as `node --test calculator-core/` is
- * NOT a valid invocation on this runtime — Node tries to load the directory as
- * a module and fails with MODULE_NOT_FOUND. Use the repo-root form above, an
- * explicit test file, or a glob like `node --test "calculator-core/**\/*.test.js"`.)
+ * (Note: the bare directory form `node --test calculator-core/` works because
+ * calculator-core/package.json sets "main":"index.js" and calculator-core/index.js
+ * is a directory-resolvable entry point that requires every *.test.js module; on
+ * this runtime (Node v22) Node resolves the directory to that entry point and so
+ * runs the full suite. See calculator-core/index.js.)
  *
  * Isolation note (AAP §2): calculate() records every SUCCESSFUL computation
  * into the shared, module-level `history` singleton (history.js keeps its
@@ -435,3 +437,204 @@ test('3g: getHistory() returns defensive, frozen snapshots that cannot corrupt t
     assert.notEqual(second[0].timestamp.getUTCFullYear(), 1900);  // Date clone was isolated
     assert.notStrictEqual(first[0], second[0]);                   // independent snapshots
 });
+
+// ===========================================================================
+// F1 (CRITICAL) — Browser-bridge fail-closed regression tests.
+//
+// Root cause (review finding F1): calculator-ui/index.html bridges the pure
+// CommonJS math-engine files into the browser by running each `module.exports =
+// fn;` op file under a shared `window.module` shim and copying the export into
+// `window.mathEngine`. The ORIGINAL bridge set `window.module = { exports: {} }`
+// ONCE. If a later op script failed to load (404 / blocked / parse error),
+// `module.exports` still held the PREVIOUS op's function, so the capture copied
+// a STALE DUPLICATE — e.g. `window.mathEngine.modulus === window.mathEngine.divide`.
+// calculator.js only type-checked its dependencies (both looked like functions),
+// so `7 % 3` was computed by `divide` and silently displayed 2.3333333333333335
+// instead of 1. The calculator did NOT fail; it produced WRONG arithmetic.
+//
+// The two-layer fix under regression here:
+//   (1) index.html arms a UNIQUE private sentinel on `module.exports` BEFORE each
+//       op script and, AFTER each, captures the export ONLY when it is a fresh
+//       callable that is NOT the sentinel (then re-arms the sentinel). A missing
+//       script therefore leaves the sentinel in place -> the op key stays ABSENT
+//       (never a stale duplicate).
+//   (2) calculator.js validates the injected browser globals at init: a missing/
+//       non-callable op AND an identity collision (two ops that are the SAME
+//       function reference — the exact stale-duplicate corruption) both throw a
+//       structured ERR_DEPENDENCY, so the core FAILS CLOSED (publishes no usable
+//       `calculatorCore`) instead of computing wrong results.
+//
+// These tests reproduce the browser wiring headlessly with node:vm. The harness
+// runs the EXACT bridge protocol from index.html (sentinel shim + per-op
+// __captureOp + teardown) over the REAL math-engine op source files, optionally
+// "blocking" an op to simulate a failed <script>, then loads the REAL history.js
+// and calculator.js through their UMD browser (else) branch — proving the fix in
+// the same code path the browser uses, with zero third-party dependencies (C-001).
+// ===========================================================================
+const vm = require('node:vm');
+const fs = require('node:fs');
+const path = require('node:path');
+
+// The seven engine operations, in the exact <script> order used by index.html.
+const BRIDGE_OP_ORDER = ['add', 'subtract', 'multiply', 'divide', 'modulus', 'power', 'sqrt'];
+
+// Read a source file from this package by repo-relative path (this test lives in
+// calculator-core/, so __dirname is calculator-core/).
+function readCoreSrc(relParts) {
+    return fs.readFileSync(path.join(__dirname, ...relParts), 'utf8');
+}
+
+// The sentinel shim + __captureOp helper, copied VERBATIM from index.html step 1
+// so this harness exercises the real bridge logic (kept byte-for-byte in sync).
+const BRIDGE_SHIM_SRC = `
+    window.mathEngine = {};
+    window.module = { exports: {} };
+    window.__mathEngineUnloaded = { calculatorBridgeSentinel: true };
+    window.module.exports = window.__mathEngineUnloaded;
+    window.__captureOp = function (name) {
+        var ex = window.module.exports;
+        if (ex !== window.__mathEngineUnloaded && typeof ex === 'function') {
+            window.mathEngine[name] = ex;
+        }
+        window.module.exports = window.__mathEngineUnloaded;
+    };
+`;
+
+// index.html step 3: tear the CommonJS shim + bridge helpers down so the UMD
+// history.js / calculator.js files take their BROWSER (else) branch.
+const BRIDGE_TEARDOWN_SRC =
+    'window.module = undefined; window.__captureOp = undefined; window.__mathEngineUnloaded = undefined;';
+
+// Build a browser-like vm sandbox where `window` IS the global (as in a real
+// browser), run the full index.html bridge protocol over the real op sources
+// (skipping any op named in `blockedOps` to simulate a failed <script>), load the
+// real history.js, then attempt to load the real calculator.js. Returns the
+// sandbox plus any error calculator.js threw at init.
+function runBrowserBridge(blockedOps) {
+    const blocked = blockedOps || [];
+    const sandbox = {};
+    const ctx = vm.createContext(sandbox);
+    // Browser invariant: window === globalThis. Establish it before anything else
+    // so bare `module` (used by the op files) and `window.module` (used by the
+    // bridge) resolve to the SAME global property — exactly as in the browser.
+    vm.runInContext('window = globalThis;', ctx);
+
+    // Step 1 — sentinel shim + __captureOp.
+    vm.runInContext(BRIDGE_SHIM_SRC, ctx);
+
+    // Step 2 — for each op: run the op source (unless blocked), then capture.
+    // A blocked op is NOT run, so module.exports stays the sentinel and the op
+    // key is never added to window.mathEngine (fail closed, never a duplicate).
+    for (const name of BRIDGE_OP_ORDER) {
+        if (blocked.indexOf(name) === -1) {
+            vm.runInContext(readCoreSrc(['math-engine', name + '.js']), ctx);
+        }
+        vm.runInContext('window.__captureOp(' + JSON.stringify(name) + ');', ctx);
+    }
+
+    // Step 3 — teardown so the UMD files take the browser branch.
+    vm.runInContext(BRIDGE_TEARDOWN_SRC, ctx);
+
+    // Step 4 — history.js self-registers window.calculatorHistory (browser branch).
+    vm.runInContext(readCoreSrc(['history.js']), ctx);
+
+    // Step 5 — calculator.js reads window.mathEngine + window.calculatorHistory and
+    // publishes window.calculatorCore (or throws ERR_DEPENDENCY, failing closed).
+    let error = null;
+    try {
+        vm.runInContext(readCoreSrc(['calculator.js']), ctx);
+    } catch (e) {
+        error = e;
+    }
+    return { sandbox, error };
+}
+
+// Load calculator.js through its browser branch against a caller-supplied
+// mathEngine + history (bypassing the bridge) to exercise calculator.js's own
+// dependency guards directly. `module` is never defined, so the UMD else branch
+// runs. Returns the sandbox plus any init error.
+function loadCoreInBrowser(mathEngine, history) {
+    const sandbox = {};
+    const ctx = vm.createContext(sandbox);
+    vm.runInContext('window = globalThis;', ctx);
+    sandbox.window.mathEngine = mathEngine;      // window === global, so also sandbox.mathEngine
+    sandbox.window.calculatorHistory = history;
+    let error = null;
+    try {
+        vm.runInContext(readCoreSrc(['calculator.js']), ctx);
+    } catch (e) {
+        error = e;
+    }
+    return { sandbox, error };
+}
+
+test('F1 browser bridge: a MISSING operation script fails CLOSED (never a stale duplicate)', () => {
+    // Simulate modulus.js failing to load (the finding's exact scenario).
+    const { sandbox, error } = runBrowserBridge(['modulus']);
+
+    // The sentinel bridge left `modulus` ABSENT — critically, it is NOT a stale
+    // duplicate of `divide` (the old catastrophic bug that computed 7 % 3 as 7 / 3).
+    assert.equal(typeof sandbox.mathEngine.modulus, 'undefined',
+        'a failed op script must leave its key absent, not a stale export');
+    assert.notStrictEqual(sandbox.mathEngine.modulus, sandbox.mathEngine.divide,
+        'modulus must NEVER alias divide when its script fails to load');
+    // Every op that DID load is still captured correctly.
+    assert.equal(typeof sandbox.mathEngine.divide, 'function');
+    assert.equal(typeof sandbox.mathEngine.add, 'function');
+
+    // calculator.js refused to publish a usable core: it threw ERR_DEPENDENCY
+    // naming the missing operation, and window.calculatorCore was never set.
+    assert.ok(error, 'calculator.js must throw when a required op is missing');
+    assert.equal(error.code, 'ERR_DEPENDENCY');
+    assert.match(error.message, /modulus/);
+    assert.equal(typeof sandbox.calculatorCore, 'undefined',
+        'no usable calculatorCore may be published when a dependency is missing');
+});
+
+test('F1 browser bridge: a HEALTHY load publishes calculatorCore with 7 distinct ops', () => {
+    const { sandbox, error } = runBrowserBridge([]); // nothing blocked
+
+    assert.equal(error, null, 'a complete bridge must not throw');
+    assert.equal(typeof sandbox.calculatorCore, 'object');
+    assert.notEqual(sandbox.calculatorCore, null);
+
+    // All seven ops were captured and are DISTINCT function references.
+    const refs = new Set();
+    for (const name of BRIDGE_OP_ORDER) {
+        assert.equal(typeof sandbox.mathEngine[name], 'function', name + ' should be captured');
+        refs.add(sandbox.mathEngine[name]);
+    }
+    assert.equal(refs.size, BRIDGE_OP_ORDER.length, 'all seven ops must be distinct functions');
+    assert.notStrictEqual(sandbox.mathEngine.modulus, sandbox.mathEngine.divide);
+
+    // End-to-end through the published facade: modulus computes 7 % 3 === 1
+    // (NOT 7 / 3 ≈ 2.333, which is exactly what the F1 bug produced).
+    assert.equal(sandbox.calculatorCore.calculate('%', 7, 3), 1);
+});
+
+test('F1 browser bridge: a STALE DUPLICATE (modulus === divide) fails CLOSED via identity guard', () => {
+    // Directly feed calculator.js the exact corruption the old bridge produced:
+    // `modulus` pointing at the SAME function as `divide`. A plain typeof check
+    // cannot catch this (both are functions); the identity-collision guard must.
+    const divide = require('./math-engine/divide');
+    const engineWithDuplicate = {
+        add: require('./math-engine/add'),
+        subtract: require('./math-engine/subtract'),
+        multiply: require('./math-engine/multiply'),
+        divide: divide,
+        modulus: divide, // STALE DUPLICATE — the F1 corruption
+        power: require('./math-engine/power'),
+        sqrt: require('./math-engine/sqrt')
+    };
+    const historyStub = { record() {}, getAll() { return []; }, clear() {} };
+
+    const { sandbox, error } = loadCoreInBrowser(engineWithDuplicate, historyStub);
+
+    assert.ok(error, 'a duplicate operation reference must be rejected');
+    assert.equal(error.code, 'ERR_DEPENDENCY');
+    assert.match(error.message, /same function/);
+    assert.match(error.message, /stale|duplicate/);
+    assert.equal(typeof sandbox.calculatorCore, 'undefined',
+        'no usable calculatorCore may be published when two ops are the same function');
+});
+

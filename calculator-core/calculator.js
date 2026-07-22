@@ -110,6 +110,32 @@ function (add, subtract, multiply, divide, modulus, power, sqrt, history) {
             throw depErr;
         }
     }
+
+    // Identity-collision guard (F1 defense-in-depth for the browser bridge).
+    // The seven engine operations are seven DISTINCT one-function-per-file
+    // modules, so no two should ever be the SAME function reference. If two are
+    // identical, the browser bridge captured a STALE duplicate — e.g. a failed
+    // modulus.js load leaving `modulus` pointing at the previously-loaded
+    // `divide` — which a plain typeof check cannot detect (both look like
+    // functions). Reject it here so a mis-captured operation fails CLOSED with a
+    // structured ERR_DEPENDENCY instead of silently computing the wrong
+    // arithmetic. In Node (require) the modules are always distinct, so this
+    // never triggers on the tested path; it hardens the untrusted browser
+    // globals. O(n^2) over a fixed n=7 — negligible, runs once at init.
+    for (var x = 0; x < REQUIRED_OPERATIONS.length; x++) {
+        for (var y = x + 1; y < REQUIRED_OPERATIONS.length; y++) {
+            if (REQUIRED_OPERATIONS[x][1] === REQUIRED_OPERATIONS[y][1]) {
+                var dupErr = new Error(
+                    'calculator-core dependency invalid: math-engine operations "' +
+                    REQUIRED_OPERATIONS[x][0] + '" and "' + REQUIRED_OPERATIONS[y][0] +
+                    '" are the same function (a stale/duplicate bridge capture)'
+                );
+                dupErr.code = 'ERR_DEPENDENCY';
+                throw dupErr;
+            }
+        }
+    }
+
     if (history === null || typeof history !== 'object') {
         var historyErr = new Error(
             'calculator-core dependency missing or invalid: history store is not available'
@@ -353,12 +379,19 @@ function (add, subtract, multiply, divide, modulus, power, sqrt, history) {
     }
 
     /**
-     * Convenience delegator: return every recorded history entry (a defensive
-     * shallow copy, oldest first) so the UI has a single import surface.
-     * `history.js` remains independently consumable.
+     * Convenience delegator: return every recorded history entry so the UI has a
+     * single import surface. `history.js` remains independently consumable.
      *
-     * @returns {Array<{ expression: string, result: number, timestamp: Date }>}
-     *          A shallow copy of the stored history entries.
+     * Delegates to history.getAll(), which returns a FRESH array of FROZEN,
+     * DEEP-CLONED entry snapshots (each entry object is Object.freeze()d and its
+     * `timestamp` is a newly-cloned Date), in insertion order (oldest first).
+     * Callers therefore cannot mutate the internal store by pushing/splicing the
+     * returned array, reassigning an entry's fields, or mutating a returned Date
+     * (finding F11: the previous "shallow copy" wording did not match this
+     * deep-cloned, frozen behavior).
+     *
+     * @returns {Array<Readonly<{ expression: string, result: number, timestamp: Date }>>}
+     *          A fresh array of frozen, deep-cloned entry snapshots, oldest first.
      */
     function getHistory() {
         return getAllHistory();

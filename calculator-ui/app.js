@@ -245,8 +245,14 @@
 
             var time = document.createElement('span');
             time.className = 'history-time';
+            // entry.timestamp is a Date supplied by the core; history.js now
+            // guarantees a VALID instant. Guard defensively anyway (finding F6,
+            // UI side): coerce a non-Date value, and if the result is not a valid
+            // instant (getTime() is NaN) render an empty timestamp rather than the
+            // browser's literal "Invalid Date" string. The timestamp is muted
+            // metadata, so a friendly empty fallback keeps the row readable.
             var ts = (entry.timestamp instanceof Date) ? entry.timestamp : new Date(entry.timestamp);
-            time.textContent = ts.toLocaleTimeString();
+            time.textContent = Number.isFinite(ts.getTime()) ? ts.toLocaleTimeString() : '';
 
             li.appendChild(expr);
             li.appendChild(time);
@@ -336,9 +342,60 @@
     }
 
     /*
+     * Disable every interactive control that DID resolve. Used when the DOM
+     * contract is incomplete (see init) so a half-initialized calculator cannot
+     * be operated into an inconsistent state. Each reference is null-checked
+     * because the very reason we are here is that some elements are missing.
+     */
+    function disableControls() {
+        if (operandA) { operandA.disabled = true; }
+        if (operandB) { operandB.disabled = true; }
+        if (equalsBtn) { equalsBtn.disabled = true; }
+        if (clearBtn) { clearBtn.disabled = true; }
+        if (opButtons) {
+            for (var i = 0; i < opButtons.length; i++) {
+                opButtons[i].disabled = true;
+            }
+        }
+    }
+
+    /*
+     * Report a failed initialization VISIBLY (never only to the console) and
+     * disable whatever controls loaded (finding F7). Prefer the dedicated #error
+     * region; if that element is itself missing, insert a role="alert" banner at
+     * the top of <body> so the failure is always surfaced to the user.
+     *
+     * @param {string[]} missing Human-readable selectors of the absent elements.
+     */
+    function reportInitFailure(missing) {
+        var msg = 'Calculator failed to initialize: missing required UI element(s): ' +
+            missing.join(', ') + '.';
+        if (errorEl) {
+            errorEl.textContent = msg;
+        } else {
+            var banner = document.createElement('div');
+            banner.className = 'error';
+            banner.setAttribute('role', 'alert');
+            banner.textContent = msg;
+            if (document.body) {
+                document.body.insertBefore(banner, document.body.firstChild);
+            }
+        }
+        disableControls();
+    }
+
+    /*
      * One-time initialization: resolve DOM references, wire event listeners,
      * seed operator-button ARIA state, and render any pre-existing history
      * (normally empty at startup).
+     *
+     * Before wiring anything, validate the full DOM contract this controller
+     * depends on (finding F7). app.js selects a fixed set of ids/classes (see the
+     * module-header contract); if the HTML is edited so any of them is missing,
+     * wiring handlers piecemeal would leave a SILENTLY half-working calculator
+     * (e.g. a missing #result drops all output while buttons still "work"). We
+     * instead fail loudly: surface a visible error, disable the controls that did
+     * load, and stop before attaching any listeners.
      */
     function init() {
         operandA = document.getElementById('operand-a');
@@ -349,6 +406,34 @@
         historyList = document.getElementById('history-list');
         clearBtn = document.getElementById('clear-history');
         opButtons = document.querySelectorAll('.op-btn');
+
+        // Validate the required DOM contract BEFORE wiring any handlers (F7).
+        // Every listed element is essential: without it the calculator cannot
+        // read operands, dispatch a computation, show a result/error, or manage
+        // history. A missing element must not silently disable part of the UI.
+        var required = [
+            ['#operand-a', operandA],
+            ['#operand-b', operandB],
+            ['#equals', equalsBtn],
+            ['#result', resultEl],
+            ['#error', errorEl],
+            ['#history-list', historyList],
+            ['#clear-history', clearBtn]
+        ];
+        var missing = [];
+        for (var m = 0; m < required.length; m++) {
+            if (!required[m][1]) {
+                missing.push(required[m][0]);
+            }
+        }
+        // At least one operator button must exist, or no operation is selectable.
+        if (!opButtons || opButtons.length === 0) {
+            missing.push('.op-btn');
+        }
+        if (missing.length > 0) {
+            reportInitFailure(missing);
+            return; // Fail closed: do NOT wire a partial, misleading UI.
+        }
 
         // Operator buttons: on click, clear any stale error and select the
         // operator named by the button's data-op attribute. Each button starts

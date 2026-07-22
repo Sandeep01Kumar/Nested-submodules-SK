@@ -1,3 +1,12 @@
+/* F10: baseline typography on <body> so ALL page text — including the <h1>
+   heading, which sits outside .calculator — uses the app's sans-serif stack
+   instead of the browser default serif (Times). The stack mirrors .calculator
+   for a consistent look. Hand-authored, framework-free (zero third-party deps). */
+body {
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    color: #212121;
+}
+
 button {
     width:50px;
     height:40px;
@@ -170,6 +179,14 @@ button {
     justify-content: space-between;
     gap: 8px;
     margin-bottom: 4px;
+}
+
+/* Normalize the History panel heading (F8 promoted it h3 -> h2): drop the large
+   default h2 margins/size so it sits neatly in the flex header row and stays
+   visually consistent with the compact panel, without a size jump. */
+.history-header h2 {
+    margin: 0;
+    font-size: 1.2rem;
 }
 
 /* Override the 50x40 base `button` size so the wide "Clear History" label fits,
