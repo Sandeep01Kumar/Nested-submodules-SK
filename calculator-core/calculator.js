@@ -82,6 +82,66 @@
 function (add, subtract, multiply, divide, modulus, power, sqrt, history) {
     'use strict';
 
+    // -----------------------------------------------------------------------
+    // Dependency validation (fail-fast — browser-bridge trust boundary; C-004).
+    //
+    // In Node the eight dependencies resolve via require() and are always
+    // present. In the browser (no bundler) they are injected from EXTERNAL
+    // globals — window.mathEngine.* and window.calculatorHistory — that this
+    // factory does not own and cannot assume were preloaded correctly. Validate
+    // every dependency HERE, before publishing any API, so a missing or
+    // non-callable member fails IMMEDIATELY at initialization with a clear,
+    // stable ERR_DEPENDENCY error that names the offending member — instead of
+    // publishing a usable-looking `calculatorCore` whose first calculate() call
+    // later dies with a generic "def.fn is not a function" (operations) or a raw
+    // property-access TypeError (history).
+    // -----------------------------------------------------------------------
+    var REQUIRED_OPERATIONS = [
+        ['add', add], ['subtract', subtract], ['multiply', multiply],
+        ['divide', divide], ['modulus', modulus], ['power', power], ['sqrt', sqrt]
+    ];
+    for (var d = 0; d < REQUIRED_OPERATIONS.length; d++) {
+        if (typeof REQUIRED_OPERATIONS[d][1] !== 'function') {
+            var depErr = new Error(
+                'calculator-core dependency missing or invalid: math-engine operation "' +
+                REQUIRED_OPERATIONS[d][0] + '" is not a function'
+            );
+            depErr.code = 'ERR_DEPENDENCY';
+            throw depErr;
+        }
+    }
+    if (history === null || typeof history !== 'object') {
+        var historyErr = new Error(
+            'calculator-core dependency missing or invalid: history store is not available'
+        );
+        historyErr.code = 'ERR_DEPENDENCY';
+        throw historyErr;
+    }
+    var REQUIRED_HISTORY_METHODS = ['record', 'getAll', 'clear'];
+    for (var h = 0; h < REQUIRED_HISTORY_METHODS.length; h++) {
+        if (typeof history[REQUIRED_HISTORY_METHODS[h]] !== 'function') {
+            var methodErr = new Error(
+                'calculator-core dependency missing or invalid: history.' +
+                REQUIRED_HISTORY_METHODS[h] + ' is not a function'
+            );
+            methodErr.code = 'ERR_DEPENDENCY';
+            throw methodErr;
+        }
+    }
+
+    // Capture TRUSTED references to the validated history methods at
+    // initialization. calculate()/getHistory()/clearHistory() invoke these
+    // captured references — NOT `history.record`/`.getAll`/`.clear` re-read at
+    // call time — so even if a consumer could swap a method on the history
+    // object after load, the facade still routes every record/read/clear to the
+    // real, original store. history.js additionally freezes its exported API
+    // object as defense in depth. Its methods are closure-based (they close over
+    // the private entries array and use no `this`), so capturing the bare
+    // function references is safe and preserves their behavior exactly.
+    var recordHistory = history.record;
+    var getAllHistory = history.getAll;
+    var clearHistoryStore = history.clear;
+
     /**
      * Ordered, single-source-of-truth operator definitions.
      *
@@ -158,37 +218,65 @@ function (add, subtract, multiply, divide, modulus, power, sqrt, history) {
      * Compute a single arithmetic operation and record it to history.
      *
      * Behavior (executed strictly in this order):
-     *   1. Resolve `operator` (canonical symbol OR alias) via the dispatch map;
-     *      an unrecognized operator throws an ERR_UNKNOWN_OPERATOR error.
+     *   1. Resolve `operator` (canonical symbol OR alias) via the dispatch map.
+     *      A non-string operator, or an unrecognized string, throws an
+     *      ERR_UNKNOWN_OPERATOR error. Non-string operators are rejected WITHOUT
+     *      being coerced (so an object's toString() can never be invoked to
+     *      forge a valid key, and a Symbol never triggers a raw TypeError).
      *   2. Verify that enough operands were supplied for the operator's arity;
-     *      too few throws an ERR_ARITY error.
+     *      too few throws an ERR_ARITY error. Extra operands beyond the arity are
+     *      ignored (minimum-arity policy).
      *   3. Delegate the computation to the math-engine function. The engine
      *      guards invalid work (divide/modulus by zero, square root of a
      *      negative, non-finite operands) by THROWING; those surface here as
      *      structured errors — never as a silent NaN/Infinity (constraint
      *      C-004). The original message is preserved verbatim and the original
      *      error is attached as `.cause`.
+     *   3b. Guard the RESULT: the value returned by the operation must be a
+     *      finite number. A non-number or non-finite result (possible only via
+     *      the browser bridge, where the operation functions are external and
+     *      untrusted) throws ERR_OPERATION before anything is recorded (C-004).
      *   4. Build the canonical display expression (aliases normalize to the
      *      symbol): binary -> "a <symbol> b"; unary sqrt -> "√(a)".
-     *   5. Record { expression, result, timestamp } to history — SUCCESS ONLY.
+     *   5. Record { expression, result, timestamp } to history — SUCCESS ONLY,
+     *      via the captured, trusted history.record reference.
      *   6. Return the numeric result.
      *
      * @param {string} operator   Operator symbol or alias (e.g. '+', 'add', '√').
      * @param {...number} operands Operand(s): 2 for binary, 1 for unary sqrt.
      * @returns {number}          The computed numeric result.
-     * @throws {Error} ERR_UNKNOWN_OPERATOR when `operator` is not recognized.
+     * @throws {Error} ERR_UNKNOWN_OPERATOR when `operator` is not a string, or is
+     *                                       a string that is not recognized.
      * @throws {Error} ERR_ARITY            when too few operands are supplied.
      * @throws {Error} ERR_OPERATION        when the engine rejects the operands
      *                                       (message forwarded from the engine,
-     *                                       original error kept as `.cause`).
+     *                                       original error kept as `.cause`), or
+     *                                       when the operation yields a
+     *                                       non-finite result.
      */
     function calculate(operator) {
-        // Operands are every argument after `operator`. Collecting them from
-        // `arguments` keeps this function plain ES5 (matching the engine and
-        // history modules) so it needs no transpilation for the browser bridge.
-        var operands = Array.prototype.slice.call(arguments, 1);
+        // Operand COUNT is derived from arguments.length in O(1); the variadic
+        // arguments are NEVER copied into an array. Only the one or two operands
+        // an operator actually needs are read (directly, by index), so both the
+        // work and the memory this facade uses stay O(1) regardless of how many
+        // extra operands a caller supplies.
+        var operandCount = arguments.length - 1;
 
         // 1. Resolve the operator (canonical symbol or alias).
+        //
+        //    The operator MUST be a string. Property-key access would otherwise
+        //    COERCE a non-string key: an object whose toString() returns '+'
+        //    would silently execute addition (CWE-20 improper input validation),
+        //    and a Symbol would raise a raw, unstructured TypeError from string
+        //    concatenation. Reject every non-string up front with a structured
+        //    ERR_UNKNOWN_OPERATOR — WITHOUT coercing the attacker-controlled
+        //    value (the message reports only its typeof, never String(value)).
+        if (typeof operator !== 'string') {
+            var typeErr = new Error('Unknown operator: expected a string but received ' + (typeof operator));
+            typeErr.code = 'ERR_UNKNOWN_OPERATOR';
+            throw typeErr;
+        }
+
         var def = DISPATCH[operator];
         if (!def) {
             var unknownErr = new Error('Unknown operator: ' + operator);
@@ -196,12 +284,20 @@ function (add, subtract, multiply, divide, modulus, power, sqrt, history) {
             throw unknownErr;
         }
 
-        // 2. Arity check — reject calls with too few operands up front.
-        if (operands.length < def.arity) {
+        // 2. Arity check — reject calls with too few operands up front. Extra
+        //    operands beyond the operator's arity are ignored (minimum-arity
+        //    policy), never copied.
+        if (operandCount < def.arity) {
             var arityErr = new Error('Operator "' + operator + '" expects ' + def.arity + ' operand(s)');
             arityErr.code = 'ERR_ARITY';
             throw arityErr;
         }
+
+        // Read ONLY the operands this operator needs, directly from `arguments`
+        // (O(1)). `b` is read unconditionally (it is simply `undefined` for the
+        // unary operator, which never uses it) to keep the access pattern flat.
+        var a = arguments[1];
+        var b = arguments[2];
 
         // 3. Compute via the math-engine. Engine modules throw structured
         //    Error objects for invalid work; re-surface them with operator
@@ -210,8 +306,8 @@ function (add, subtract, multiply, divide, modulus, power, sqrt, history) {
         var result;
         try {
             result = def.arity === 1
-                ? def.fn(operands[0])
-                : def.fn(operands[0], operands[1]);
+                ? def.fn(a)
+                : def.fn(a, b);
         } catch (opError) {
             var opMessage = (opError && opError.message) ? opError.message : String(opError);
             var wrapped = new Error(opMessage, { cause: opError });
@@ -220,15 +316,33 @@ function (add, subtract, multiply, divide, modulus, power, sqrt, history) {
             throw wrapped;
         }
 
+        // 3b. Facade-level finite-result guard (constraint C-004; defense in
+        //     depth). In Node the engine modules already guard their own result
+        //     domain, but in the browser bridge the operation functions come
+        //     from an external global (window.mathEngine) that this facade does
+        //     NOT own. A dependency that returns a non-number, or a non-finite
+        //     number (NaN/Infinity), must NEVER escape as a "successful" result
+        //     nor be recorded to history. Enforce the numeric, finite contract
+        //     HERE — immediately after the operation call, before building the
+        //     expression or recording — by throwing a structured ERR_OPERATION.
+        if (typeof result !== 'number' || !Number.isFinite(result)) {
+            var resultErr = new Error('Result is not a finite number');
+            resultErr.code = 'ERR_OPERATION';
+            resultErr.operator = def.symbol;
+            throw resultErr;
+        }
+
         // 4. Build the canonical display expression (an alias normalizes to its
         //    symbol because `def.symbol` is always the canonical token).
         var expression = def.arity === 1
-            ? def.symbol + '(' + operands[0] + ')'
-            : operands[0] + ' ' + def.symbol + ' ' + operands[1];
+            ? def.symbol + '(' + a + ')'
+            : a + ' ' + def.symbol + ' ' + b;
 
-        // 5. Record to history ON SUCCESS ONLY (steps 1–3 throw before here on
-        //    any failure, so failed computations are never recorded).
-        history.record({
+        // 5. Record to history ON SUCCESS ONLY (every failure path above throws
+        //    before here, so failed computations are never recorded). The
+        //    captured, TRUSTED `recordHistory` reference is used so a swapped
+        //    `history.record` cannot intercept the entry.
+        recordHistory({
             expression: expression,
             result: result,
             timestamp: new Date()
@@ -247,7 +361,7 @@ function (add, subtract, multiply, divide, modulus, power, sqrt, history) {
      *          A shallow copy of the stored history entries.
      */
     function getHistory() {
-        return history.getAll();
+        return getAllHistory();
     }
 
     /**
@@ -256,7 +370,7 @@ function (add, subtract, multiply, divide, modulus, power, sqrt, history) {
      * @returns {undefined}
      */
     function clearHistory() {
-        return history.clear();
+        return clearHistoryStore();
     }
 
     // Public API surface consumed by calculator-ui (and node:test).

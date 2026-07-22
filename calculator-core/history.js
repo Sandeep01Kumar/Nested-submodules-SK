@@ -167,10 +167,19 @@
     }
 
     // Public API surface consumed by calculator.js and calculator-ui.
-    return {
+    //
+    // The API object itself is FROZEN (not only the per-entry snapshots) so a
+    // consumer cannot REPLACE a method after load — e.g. `history.record = fn`
+    // to intercept every subsequent facade computation and divert entries away
+    // from the real store, corrupting shared-state integrity. Under the module's
+    // 'use strict' such a reassignment throws a TypeError instead of silently
+    // succeeding. Combined with the facade capturing its own trusted method
+    // references at initialization (see calculator.js), the record/getAll/clear
+    // surface can never be swapped out from under the facade.
+    return Object.freeze({
         record: record,
         getAll: getAll,
         list: list,
         clear: clear
-    };
+    });
 }));

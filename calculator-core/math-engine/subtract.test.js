@@ -31,3 +31,15 @@ test('subtract: rejects non-finite / non-numeric operands (A-002 guarded)', () =
         assert.throws(() => subtract(a, b), /Invalid operand: not a finite number/);
     }
 });
+
+test('subtract: rejects a non-finite RESULT from finite operands (overflow) (C-004)', () => {
+    // Two FINITE operands can still overflow to a non-finite value
+    // (subtract(Number.MAX_VALUE, -Number.MAX_VALUE) === MAX + MAX === Infinity).
+    // The module must surface this as an explicit result-domain error rather
+    // than silently returning Infinity — input-only validation is NOT
+    // sufficient (C-004).
+    assert.throws(
+        () => subtract(Number.MAX_VALUE, -Number.MAX_VALUE),
+        { name: 'Error', message: 'Result is not a finite number' }
+    );
+});

@@ -103,6 +103,20 @@ button {
     background: #d9d9d9;
 }
 
+/* When the CURRENTLY-SELECTED operator button is ALSO being pressed, the
+   equal-specificity `.op-btn:active` rule (light #d9d9d9 background) would
+   otherwise combine with the selected state's white text (#ffffff) — measuring
+   only ~1.41:1 and failing WCAG 1.4.3 (contrast minimum). This more-specific
+   rule ((0,3,0) beats the (0,2,0) of both `.op-btn:active` and
+   `.op-btn.selected`) keeps a DARK (darker-blue) background so the white
+   selected-state text stays high-contrast (#ffffff on #14549b ≈ 7.58:1, well
+   above the 4.5:1 AA minimum) while still giving a clear pressed treatment. */
+.op-btn.selected:active {
+    background: #14549b;
+    color: #ffffff;
+    border-color: #14549b;
+}
+
 #equals:active {
     background: #1f5122;
 }

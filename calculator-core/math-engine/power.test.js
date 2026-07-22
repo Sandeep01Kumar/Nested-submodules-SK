@@ -30,3 +30,23 @@ test('power: rejects non-finite / non-numeric operands (A-002 guarded)', () => {
         assert.throws(() => power(a, b), /Invalid operand: not a finite number/);
     }
 });
+
+test('power: rejects non-finite RESULTS from finite operands (NaN / Infinity / overflow) (C-004)', () => {
+    // Finite operands can still drive Math.pow to a non-finite value. Each of
+    // these MUST throw an explicit result-domain error, never silently return
+    // NaN/Infinity (a result guard — not just input validation — is required):
+    //   power(-2, 0.5)             -> NaN      (negative base, fractional exponent)
+    //   power(0, -1)               -> Infinity (zero base, negative exponent)
+    //   power(Number.MAX_VALUE, 2) -> Infinity (overflow)
+    const cases = [
+        [-2, 0.5],
+        [0, -1],
+        [Number.MAX_VALUE, 2]
+    ];
+    for (const [a, b] of cases) {
+        assert.throws(
+            () => power(a, b),
+            { name: 'Error', message: 'Result is not a finite number' }
+        );
+    }
+});

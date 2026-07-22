@@ -262,3 +262,176 @@ test('3d: the OPERATORS symbol set equals the seven supported symbols', () => {
     const expected = ['+', '-', '*', '/', '%', '^', '\u221a'].sort();
     assert.deepStrictEqual(actual, expected);
 });
+
+// ===========================================================================
+// 3e. Comprehensive structured-error contract (constraint C-004) — EVERY
+//     failure class throws a real Error with the EXACT { name, code, message }
+//     AND leaves history EMPTY. This pins that invalid work is never a silent
+//     NaN/Infinity and is never recorded, for every documented failure mode:
+//     unknown / non-string operators, arity (with exact messages), engine
+//     domain guards (divide/modulus by zero incl. signed -0, sqrt of a
+//     negative, non-finite / string operands), and finite-input INVALID
+//     RESULTS (power domain / overflow, arithmetic overflow).
+// ===========================================================================
+test('3e: every failure class throws exact { name, code, message } and records nothing (C-004)', () => {
+    const failures = [
+        // Unknown / invalid operators — string and (safely handled) non-string.
+        { args: ['$', 1, 2],                             code: 'ERR_UNKNOWN_OPERATOR', message: 'Unknown operator: $' },
+        { args: ['toString', 1, 2],                      code: 'ERR_UNKNOWN_OPERATOR', message: 'Unknown operator: toString' },
+        { args: [42, 1, 2],                              code: 'ERR_UNKNOWN_OPERATOR', message: 'Unknown operator: expected a string but received number' },
+        { args: [null, 1, 2],                            code: 'ERR_UNKNOWN_OPERATOR', message: 'Unknown operator: expected a string but received object' },
+        { args: [Symbol('+'), 1, 2],                     code: 'ERR_UNKNOWN_OPERATOR', message: 'Unknown operator: expected a string but received symbol' },
+        { args: [{ toString() { return '+'; } }, 1, 2],  code: 'ERR_UNKNOWN_OPERATOR', message: 'Unknown operator: expected a string but received object' },
+        // Arity — exact messages, honoring each operator's arity.
+        { args: ['+', 1],                                code: 'ERR_ARITY',            message: 'Operator "+" expects 2 operand(s)' },
+        { args: ['\u221a'],                              code: 'ERR_ARITY',            message: 'Operator "\u221a" expects 1 operand(s)' },
+        // Engine domain guards (message forwarded verbatim), including signed zero -0.
+        { args: ['/', 5, 0],                             code: 'ERR_OPERATION',        message: 'Divide by zero' },
+        { args: ['/', 5, -0],                            code: 'ERR_OPERATION',        message: 'Divide by zero' },
+        { args: ['%', 5, 0],                             code: 'ERR_OPERATION',        message: 'Modulus by zero' },
+        { args: ['%', 5, -0],                            code: 'ERR_OPERATION',        message: 'Modulus by zero' },
+        { args: ['\u221a', -1],                          code: 'ERR_OPERATION',        message: 'Square root of negative number' },
+        { args: ['+', NaN, 1],                           code: 'ERR_OPERATION',        message: 'Invalid operand: not a finite number' },
+        { args: ['+', '2', 3],                           code: 'ERR_OPERATION',        message: 'Invalid operand: not a finite number' },
+        // Finite-input INVALID RESULTS (result-domain guard): power domain / overflow / arithmetic overflow.
+        { args: ['^', -2, 0.5],                          code: 'ERR_OPERATION',        message: 'Result is not a finite number' },
+        { args: ['^', 0, -1],                            code: 'ERR_OPERATION',        message: 'Result is not a finite number' },
+        { args: ['^', Number.MAX_VALUE, 2],              code: 'ERR_OPERATION',        message: 'Result is not a finite number' },
+        { args: ['+', Number.MAX_VALUE, Number.MAX_VALUE], code: 'ERR_OPERATION',      message: 'Result is not a finite number' }
+    ];
+    for (let i = 0; i < failures.length; i += 1) {
+        const { args, code, message } = failures[i];
+        history.clear();
+        assert.throws(
+            () => calc.calculate(...args),
+            { name: 'Error', code, message },
+            'failure case #' + i + ' (expected code ' + code + ')'
+        );
+        // Side-effect proof: a FAILED computation is NEVER recorded.
+        assert.equal(history.getAll().length, 0, 'failure case #' + i + ' must leave history empty');
+    }
+});
+
+// A non-string operator whose toString() forges a valid key ('+') must NOT be
+// coerced into executing an operation (CWE-20), and must NOT record history.
+test('3e: an object operator with toString()->"+" is rejected, not executed or recorded', () => {
+    history.clear();
+    assert.throws(
+        () => calc.calculate({ toString() { return '+'; } }, 1, 2),
+        { code: 'ERR_UNKNOWN_OPERATOR' }
+    );
+    assert.equal(history.getAll().length, 0);
+});
+
+// ===========================================================================
+// 3f. Dispatch contract (F11) — every alias family normalizes to its CANONICAL
+//     symbol in the RECORDED expression, and extra operands beyond the
+//     operator's arity are ignored (minimum-arity policy).
+// ===========================================================================
+test('3f: each alias family records the CANONICAL-symbol expression (not the alias)', () => {
+    const cases = [
+        { op: 'subtract', args: [5, 2],  expected: '5 - 2' },
+        { op: 'multiply', args: [4, 3],  expected: '4 * 3' },
+        { op: 'divide',   args: [10, 2], expected: '10 / 2' },
+        { op: 'modulus',  args: [7, 3],  expected: '7 % 3' },
+        { op: 'mod',      args: [7, 3],  expected: '7 % 3' },
+        { op: 'power',    args: [2, 3],  expected: '2 ^ 3' },
+        { op: 'pow',      args: [2, 3],  expected: '2 ^ 3' },
+        { op: '**',       args: [2, 3],  expected: '2 ^ 3' },
+        { op: 'sqrt',     args: [9],     expected: '\u221a(9)' }
+    ];
+    for (const { op, args, expected } of cases) {
+        history.clear();
+        calc.calculate(op, ...args);
+        const entries = history.getAll();
+        assert.equal(entries.length, 1, 'alias "' + op + '" should record exactly one entry');
+        assert.equal(entries[0].expression, expected, 'alias "' + op + '" canonical expression');
+    }
+});
+
+test('3f: extra operands beyond arity are ignored (minimum-arity), using only the needed operands', () => {
+    // Binary: only the first two operands are used; the rest are ignored.
+    history.clear();
+    assert.equal(calc.calculate('+', 1, 2, 99, 100), 3);
+    assert.equal(history.getAll().length, 1);
+    assert.equal(history.getAll()[0].expression, '1 + 2');
+
+    // Unary sqrt: only the first operand is used; extras are ignored.
+    history.clear();
+    assert.equal(calc.calculate('\u221a', 9, 99), 3);
+    assert.equal(history.getAll().length, 1);
+    assert.equal(history.getAll()[0].expression, '\u221a(9)');
+});
+
+// ===========================================================================
+// 3g. OPERATORS metadata + immutability + dispatch integrity + getHistory
+//     defensive snapshots (F12).
+// ===========================================================================
+
+// EXACT descriptor array, in definition order, with precise labels/keys.
+test('3g: OPERATORS is the EXACT ordered 7-descriptor array (symbol, arity, label)', () => {
+    assert.deepStrictEqual(calc.OPERATORS, [
+        { symbol: '+', arity: 2, label: 'Add' },
+        { symbol: '-', arity: 2, label: 'Subtract' },
+        { symbol: '*', arity: 2, label: 'Multiply' },
+        { symbol: '/', arity: 2, label: 'Divide' },
+        { symbol: '%', arity: 2, label: 'Modulus' },
+        { symbol: '^', arity: 2, label: 'Power' },
+        { symbol: '\u221a', arity: 1, label: 'Square root' }
+    ]);
+});
+
+// Both the array and every descriptor object are frozen (immutable contract).
+test('3g: the OPERATORS array AND every descriptor are frozen', () => {
+    assert.ok(Object.isFrozen(calc.OPERATORS));
+    for (const descriptor of calc.OPERATORS) {
+        assert.ok(Object.isFrozen(descriptor));
+    }
+});
+
+// Mutation attempts on the descriptor array/objects throw in strict mode and
+// cannot register a new operator or alter existing dispatch behavior.
+test('3g: mutation attempts on OPERATORS are rejected and cannot alter dispatch', () => {
+    assert.throws(() => { calc.OPERATORS.push({ symbol: '!', arity: 2, label: 'Bang' }); }, TypeError);
+    assert.throws(() => { calc.OPERATORS[0] = { symbol: 'x', arity: 9, label: 'X' }; }, TypeError);
+    assert.throws(() => { calc.OPERATORS[0].symbol = 'x'; }, TypeError);
+    assert.throws(() => { calc.OPERATORS[0].arity = 99; }, TypeError);
+
+    // The array content is intact...
+    assert.equal(calc.OPERATORS.length, 7);
+    assert.equal(calc.OPERATORS[0].symbol, '+');
+    assert.equal(calc.OPERATORS[0].arity, 2);
+
+    // ...the fake '!' operator was never registered for dispatch...
+    assert.throws(() => calc.calculate('!', 1, 2), { code: 'ERR_UNKNOWN_OPERATOR' });
+
+    // ...and the genuine '+' operator still dispatches correctly.
+    history.clear();
+    assert.equal(calc.calculate('+', 1, 2), 3);
+});
+
+// getHistory() hands back defensive, frozen snapshots: writing to a returned
+// entry, mutating its Date clone, or pushing onto the returned array can never
+// corrupt the underlying store, and each call yields independent snapshots.
+test('3g: getHistory() returns defensive, frozen snapshots that cannot corrupt the store', () => {
+    history.clear();
+    calc.calculate('+', 2, 3);
+
+    const first = calc.getHistory();
+    assert.equal(first.length, 1);
+    assert.ok(Object.isFrozen(first[0]));
+
+    // Reassigning a frozen entry's field throws and cannot reach the store.
+    assert.throws(() => { first[0].result = 999; }, TypeError);
+    // Mutating the returned Date clone cannot corrupt the store.
+    first[0].timestamp.setUTCFullYear(1900);
+    // Pushing onto the returned array cannot grow the store.
+    first.push({ expression: 'injected', result: -1, timestamp: new Date() });
+
+    const second = calc.getHistory();
+    assert.equal(second.length, 1);                               // defensive array copy
+    assert.equal(second[0].result, 5);                            // field write was isolated
+    assert.equal(second[0].expression, '2 + 3');
+    assert.notEqual(second[0].timestamp.getUTCFullYear(), 1900);  // Date clone was isolated
+    assert.notStrictEqual(first[0], second[0]);                   // independent snapshots
+});
