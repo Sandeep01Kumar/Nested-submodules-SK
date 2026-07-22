@@ -10,8 +10,13 @@
  * built-in test runner and assertion module — no Jest / Mocha / Chai / any
  * third-party framework. Run it with the built-in runner:
  *
- *     node --test calculator-core/history.test.js
- *     node --test calculator-core/            # folder suite
+ *     node --test                                   # run the whole suite from the repo root
+ *     node --test calculator-core/history.test.js   # run just this file
+ *
+ * (Note: `node --test calculator-core/` — a bare directory argument — is NOT a
+ * valid invocation on this runtime; Node tries to load the directory as a
+ * module and fails with MODULE_NOT_FOUND. Use the repo-root form above, or pass
+ * explicit test files / a glob such as `node --test "calculator-core/**\/*.test.js"`.)
  *
  * Isolation note: history.js keeps its entries in a MODULE-LEVEL SINGLETON
  * array that is shared by every require('./history') within the same Node
@@ -20,14 +25,19 @@
  *
  * The `history.js` contract exercised here (see history.js §4):
  *   - record(entry)  -> normalizes to { expression:string, result:*, timestamp:Date },
- *                        pushes it, and returns that same stored object. A missing
- *                        `expression` becomes ''; a non-Date `timestamp` defaults to
- *                        new Date(); a supplied Date is kept by reference. Throws
- *                        TypeError when `entry` is null / not an object.
- *   - getAll()       -> a DEFENSIVE shallow copy (new array, same element refs),
- *                        oldest-first insertion order.
+ *                        stores a PRIVATE object (a caller-supplied Date is DEEP-CLONED),
+ *                        and returns a FROZEN, deep-cloned snapshot of it. A missing
+ *                        `expression` becomes ''; a non-string expression is String()-coerced;
+ *                        a non-Date `timestamp` defaults to new Date(). Throws TypeError
+ *                        when `entry` is null / not an object.
+ *   - getAll()       -> a NEW array of FROZEN, deep-cloned snapshots (fresh entry objects
+ *                        AND fresh Date clones), oldest-first insertion order.
  *   - list()         -> alias of getAll().
  *   - clear()        -> empties the store, returns undefined.
+ *
+ * Mutation isolation (finding F6): a caller can NEVER corrupt the store by writing to a
+ * returned entry, reassigning its fields (snapshots are frozen), mutating a returned Date
+ * (e.g. setUTCFullYear), or mutating a Date it passed to record() after the call.
  */
 
 const { test, beforeEach } = require('node:test');
@@ -78,29 +88,32 @@ test('record defaults timestamp to a Date when none is provided', () => {
     assert.ok(all[0].timestamp instanceof Date);
 });
 
-// Case 3 — record preserves a provided Date timestamp exactly (by reference and
-// by instant).
-test('record preserves a provided Date timestamp exactly', () => {
+// Case 3 — record preserves a provided Date timestamp BY VALUE (deep-cloned).
+// The instant is preserved, but the stored/returned Date is an independent clone,
+// NOT the caller's instance (finding F6 — no shared mutable reference).
+test('record preserves a provided Date timestamp by value as an independent clone', () => {
     const t = new Date('2020-01-01T00:00:00Z');
     const stored = history.record({ expression: 'fixed timestamp', result: 1, timestamp: t });
 
-    // Same object reference is kept (history.js stores the Date as-is).
-    assert.strictEqual(stored.timestamp, t);
-    // ...and therefore the same instant.
+    // Same instant is preserved...
     assert.equal(stored.timestamp.getTime(), t.getTime());
+    // ...but the returned Date is a CLONE, not the caller's instance.
+    assert.notStrictEqual(stored.timestamp, t);
 
-    // The stored entry references the very same Date instance.
+    // The entry retrievable via getAll() also matches by instant and is itself a
+    // fresh, independent clone.
     const all = history.getAll();
-    assert.strictEqual(all[0].timestamp, t);
     assert.equal(all[0].timestamp.getTime(), t.getTime());
+    assert.notStrictEqual(all[0].timestamp, t);
+    assert.notStrictEqual(all[0].timestamp, stored.timestamp);
 });
 
-// Case 4 — record returns the normalized stored entry: the return value carries
-// all three canonical fields and equals the entry retrievable via getAll().
-test('record returns the normalized stored entry equal to getAll() element', () => {
+// Case 4 — record returns a normalized snapshot that equals the getAll() element
+// BY VALUE, but is an independent, frozen object (not the same reference).
+test('record returns a normalized snapshot equal by value to the getAll() element', () => {
     const stored = history.record({ expression: '7 * 6', result: 42 });
 
-    // The return value exposes the canonical shape.
+    // The return value exposes the canonical shape...
     assert.ok(Object.prototype.hasOwnProperty.call(stored, 'expression'));
     assert.ok(Object.prototype.hasOwnProperty.call(stored, 'result'));
     assert.ok(Object.prototype.hasOwnProperty.call(stored, 'timestamp'));
@@ -108,10 +121,10 @@ test('record returns the normalized stored entry equal to getAll() element', () 
     const all = history.getAll();
     assert.equal(all.length, 1);
 
-    // Deep value equality with the entry retrievable via getAll()...
+    // Deep VALUE equality with the entry retrievable via getAll()...
     assert.deepStrictEqual(all[0], stored);
-    // ...and it is in fact the same object reference held internally.
-    assert.strictEqual(all[0], stored);
+    // ...but they are independent defensive snapshots, not the same reference.
+    assert.notStrictEqual(all[0], stored);
 });
 
 // Case 5 — list() is an alias of getAll(): both return equal snapshots.
@@ -149,9 +162,9 @@ test('clear() empties the store', () => {
     assert.equal(returnValue, undefined);
 });
 
-// Case 8 — getAll() returns a defensive copy: mutating the returned array must
-// NOT corrupt the internal store.
-test('getAll() returns a defensive copy that cannot mutate the store', () => {
+// Case 8 — getAll() returns a defensive array copy: mutating the returned array
+// (push/pop/splice) must NOT corrupt the internal store.
+test('getAll() returns a defensive array copy that cannot mutate the store', () => {
     history.record({ expression: 'x', result: 1 });
 
     const snapshot = history.getAll();
@@ -190,4 +203,95 @@ test('records multiple entries (table-driven) preserving count and values', () =
         assert.equal(all[i].result, inputs[i].result);
         assert.ok(all[i].timestamp instanceof Date);
     }
+});
+
+// Case 10 (F7) — record() rejects null / non-object entries with a TypeError and
+// the exact documented message (public guard was previously untested).
+test('record throws TypeError with exact message for null / non-object entries', () => {
+    const bad = [null, undefined, 42, '2 + 3', true, Symbol('s')];
+    for (const value of bad) {
+        assert.throws(
+            () => history.record(value),
+            { name: 'TypeError', message: 'history.record requires an entry object' }
+        );
+    }
+});
+
+// Case 11 (F7) — expression normalization: a missing/undefined expression becomes
+// '', and any non-string expression is String()-coerced (previously only an
+// already-normalized string was exercised).
+test('record normalizes the expression field (String coercion; undefined -> "")', () => {
+    const cases = [
+        { entry: { result: 1 }, expected: '' },                                    // missing -> ''
+        { entry: { expression: undefined, result: 1 }, expected: '' },             // undefined -> ''
+        { entry: { expression: 42, result: 1 }, expected: '42' },                  // number -> '42'
+        { entry: { expression: null, result: 1 }, expected: 'null' },              // null -> 'null'
+        { entry: { expression: true, result: 1 }, expected: 'true' },              // boolean -> 'true'
+        { entry: { expression: { toString() { return 'X'; } }, result: 1 }, expected: 'X' }, // object -> String()
+        { entry: { expression: '5 + 5', result: 10 }, expected: '5 + 5' }          // string -> unchanged
+    ];
+    for (const { entry, expected } of cases) {
+        const stored = history.record(entry);
+        assert.equal(stored.expression, expected);
+        assert.equal(typeof stored.expression, 'string');
+    }
+});
+
+// Case 12 (F7) — non-Date timestamp defaulting: any non-Date `timestamp`
+// (number, string, null, object, boolean) is ignored and defaults to a fresh
+// Date captured at record time (previously untested).
+test('record defaults a non-Date timestamp to a fresh Date', () => {
+    const nonDates = [12345, '2020-01-01T00:00:00Z', null, {}, true];
+    for (const ts of nonDates) {
+        const before = Date.now();
+        const stored = history.record({ expression: 't', result: 1, timestamp: ts });
+        const after = Date.now();
+        assert.ok(stored.timestamp instanceof Date);
+        assert.ok(stored.timestamp.getTime() >= before);
+        assert.ok(stored.timestamp.getTime() <= after);
+    }
+});
+
+// Case 13 (F6/F7) — mutation isolation via record()'s return value: the snapshot
+// is frozen (fields cannot be reassigned) and mutating its Date clone cannot
+// corrupt the store.
+test('mutation isolation: the record() return is frozen and its Date is isolated', () => {
+    const returned = history.record({ expression: 'iso', result: 1 });
+
+    // The snapshot is frozen — reassigning a field throws in strict mode.
+    assert.ok(Object.isFrozen(returned));
+    assert.throws(() => { returned.result = 999; }, TypeError);
+
+    // Mutating the returned Date clone (the exact vector from F6) must not reach
+    // the store.
+    returned.timestamp.setUTCFullYear(1900);
+    assert.notEqual(history.getAll()[0].timestamp.getUTCFullYear(), 1900);
+});
+
+// Case 14 (F6/F7) — mutation isolation via getAll(): mutating a returned entry's
+// Date must not corrupt the store, and every call yields independent clones.
+test('mutation isolation: mutating a getAll() entry Date does not corrupt the store', () => {
+    history.record({ expression: 'iso2', result: 2 });
+
+    const first = history.getAll()[0];
+    assert.ok(Object.isFrozen(first));
+    first.timestamp.setUTCFullYear(1900);
+
+    // A subsequent read is a fresh clone, unaffected by the earlier mutation.
+    const second = history.getAll()[0];
+    assert.notEqual(second.timestamp.getUTCFullYear(), 1900);
+    assert.notStrictEqual(first, second);
+    assert.notStrictEqual(first.timestamp, second.timestamp);
+});
+
+// Case 15 (F6/F7) — mutation isolation of the caller's own Date: mutating the
+// Date passed to record() AFTER the call must not change the stored instant
+// (history.js deep-clones the supplied Date on the way in).
+test('mutation isolation: mutating the caller-supplied Date after record does not corrupt the store', () => {
+    const t = new Date('2020-06-15T12:00:00Z');
+    history.record({ expression: 'iso3', result: 3, timestamp: t });
+
+    t.setUTCFullYear(1900); // mutate the caller's original Date after recording
+
+    assert.equal(history.getAll()[0].timestamp.getUTCFullYear(), 2020);
 });

@@ -49,30 +49,61 @@
      *
      * Entries are held in insertion order (oldest first). This array is a
      * singleton shared by all consumers within the same runtime/process and is
-     * never exposed directly: getAll()/list() return a defensive shallow copy
-     * so external callers cannot mutate it by pushing/splicing the returned
-     * array.
+     * never exposed directly. Every entry stored here is a private object whose
+     * `timestamp` is a Date instance owned solely by this module (a clone of any
+     * caller-supplied Date). record()/getAll()/list() never hand out these
+     * internal objects or their Dates — they return frozen, deep-cloned
+     * snapshots (see snapshot()) so external callers can neither reassign an
+     * entry's fields nor mutate a returned timestamp to corrupt later reads.
      *
      * @type {Array<{ expression: string, result: number, timestamp: Date }>}
      */
     var entries = [];
 
     /**
+     * Build a frozen, deep-cloned snapshot of a stored entry for hand-off to
+     * callers. The returned object is a NEW plain object carrying a NEW Date
+     * (cloned from the stored Date's instant), then Object.freeze()d. This is
+     * the single choke point that guarantees mutation isolation (finding F6):
+     * mutating a returned entry — including calling setUTCFullYear() on its
+     * timestamp — can never reach the internal store, and every call yields an
+     * independent copy.
+     *
+     * @param {{ expression: string, result: *, timestamp: Date }} entry
+     *        An internally-stored entry.
+     * @returns {Readonly<{ expression: string, result: *, timestamp: Date }>}
+     *          A frozen, independent snapshot.
+     */
+    function snapshot(entry) {
+        return Object.freeze({
+            expression: entry.expression,
+            result: entry.result,
+            timestamp: new Date(entry.timestamp.getTime())
+        });
+    }
+
+    /**
      * Record a calculation into the history store.
      *
-     * The supplied object is normalized into a NEW plain object of the
+     * The supplied object is normalized into a NEW private object of the
      * canonical shape `{ expression, result, timestamp }` before being stored,
-     * decoupling the stored entry from the caller's object:
+     * fully decoupling the stored entry from the caller's object:
      *   - `expression` is coerced to a string via String(...); a missing /
      *     undefined expression becomes the empty string ''.
      *   - `result` is stored exactly as provided (as-is, no coercion).
-     *   - `timestamp` is kept when the caller supplies a Date instance;
-     *     otherwise it defaults to `new Date()` captured at record time.
+     *   - `timestamp` is DEEP-CLONED when the caller supplies a Date instance
+     *     (a new Date of the same instant is stored, so later mutation of the
+     *     caller's Date cannot reach the store); otherwise it defaults to
+     *     `new Date()` captured at record time.
+     *
+     * The return value is a frozen, deep-cloned snapshot of the stored entry
+     * (see snapshot()), NOT the internal object — so mutating it (including its
+     * timestamp) cannot corrupt the store (finding F6).
      *
      * @param {{ expression?: *, result?: *, timestamp?: Date }} entry
      *        The calculation to record.
-     * @returns {{ expression: string, result: number, timestamp: Date }}
-     *          The normalized entry object that was stored.
+     * @returns {Readonly<{ expression: string, result: number, timestamp: Date }>}
+     *          A frozen, deep-cloned snapshot of the stored entry.
      * @throws {TypeError} If `entry` is null or not an object.
      */
     function record(entry) {
@@ -80,37 +111,43 @@
             throw new TypeError('history.record requires an entry object');
         }
 
-        var normalized = {
+        // Store a NEW private object. A caller-supplied Date is deep-cloned (a
+        // fresh Date of the same instant) so that later mutation of the caller's
+        // own Date instance cannot reach into the store.
+        var stored = {
             expression: entry.expression === undefined ? '' : String(entry.expression),
             result: entry.result,
-            timestamp: entry.timestamp instanceof Date ? entry.timestamp : new Date()
+            timestamp: entry.timestamp instanceof Date ? new Date(entry.timestamp.getTime()) : new Date()
         };
 
-        entries.push(normalized);
+        entries.push(stored);
 
-        return normalized;
+        // Hand back a frozen, deep-cloned snapshot — never the internal object.
+        return snapshot(stored);
     }
 
     /**
      * Return every recorded entry.
      *
-     * A shallow copy of the internal array is returned so callers cannot mutate
-     * the internal store by pushing/splicing the returned array. Entries are in
-     * insertion order (oldest first); the UI may reverse the copy for a
-     * newest-first display.
+     * Returns a NEW array of frozen, deep-cloned snapshots (each entry and its
+     * Date timestamp is cloned via snapshot()), so callers can neither mutate
+     * the internal store by pushing/splicing the returned array nor corrupt a
+     * stored entry by writing to a returned entry or its timestamp (finding F6).
+     * Entries are in insertion order (oldest first); the UI may reverse the
+     * returned array for a newest-first display.
      *
-     * @returns {Array<{ expression: string, result: number, timestamp: Date }>}
-     *          A shallow copy of the stored entries, oldest first.
+     * @returns {Array<Readonly<{ expression: string, result: number, timestamp: Date }>>}
+     *          A fresh array of frozen, deep-cloned entry snapshots, oldest first.
      */
     function getAll() {
-        return entries.slice();
+        return entries.map(snapshot);
     }
 
     /**
      * Alias of getAll(); provided because the AAP lists both names.
      *
-     * @returns {Array<{ expression: string, result: number, timestamp: Date }>}
-     *          A shallow copy of the stored entries, oldest first.
+     * @returns {Array<Readonly<{ expression: string, result: number, timestamp: Date }>>}
+     *          A fresh array of frozen, deep-cloned entry snapshots, oldest first.
      */
     function list() {
         return getAll();
