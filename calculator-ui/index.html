@@ -3,6 +3,10 @@
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <!-- F-UI-04: a concise page description so basic SEO metadata is complete
+         (Lighthouse "meta-description" audit). Zero external assets; preserves
+         the C-001 zero-dependency posture. -->
+    <meta name="description" content="A simple, zero-dependency calculator with add, subtract, multiply, divide, modulus, power, and square-root operations, plus a timestamped calculation history.">
     <title>Calculator</title>
     <!-- C-005: wire the sibling stylesheet (the original inert page loaded neither
          style.css nor app.js). style.css is a sibling of this file. -->
@@ -26,8 +30,13 @@
     <div class="calculator">
         <section class="calc-controls">
             <div class="operands">
-                <label>a <input id="operand-a" type="number" inputmode="decimal" placeholder="0"></label>
-                <label>b <input id="operand-b" type="number" inputmode="decimal" placeholder="0"></label>
+                <!-- F-UI-02: step="any" lets the native number input accept
+                     finite decimals (e.g. 2.5, 0.1) and exponent notation without
+                     reporting a spurious stepMismatch / :invalid. Without it the
+                     input defaults to step=1, so any non-integer the app computes
+                     correctly was still flagged natively invalid. -->
+                <label>a <input id="operand-a" type="number" inputmode="decimal" step="any" placeholder="0"></label>
+                <label>b <input id="operand-b" type="number" inputmode="decimal" step="any" placeholder="0"></label>
             </div>
 
             <!-- Operator keypad. Each button carries the CANONICAL calculator-core

@@ -35,7 +35,19 @@ button {
     display: flex;
     flex-direction: column;
     gap: 10px;
-    min-width: 240px;
+    /* F-UI-01: lock the controls column to a STABLE width so long results/errors
+       wrap or scroll WITHIN it instead of widening the column and pushing the
+       history panel sideways. As a flex item, .calc-controls previously had an
+       automatic min-width of min-content; a long numeric result (e.g. √2 =
+       1.4142135623730951) therefore expanded the column (~273px -> ~346px on
+       desktop) and shifted the history panel's x-position. `flex: 0 0 280px`
+       fixes the basis (no grow, no shrink), and `min-width: 0` removes the
+       min-content floor so children must fit/scroll/wrap inside the fixed width.
+       280px comfortably fits the 4x50 operator grid (218px) and the operand row
+       (210px). The mobile @media block below resets this basis because the
+       .calculator switches to a column flex direction there. */
+    flex: 0 0 280px;
+    min-width: 0;
 }
 
 /* Operand input row. */
@@ -53,6 +65,14 @@ button {
     font-family: inherit;
     border: 1px solid #cccccc;
     border-radius: 4px;
+    /* F-UI-03: raise the operand inputs to the >= 44x44 interactive target size
+       (WCAG 2.5.5 / 2.5.8), matching the operator/=/Clear buttons which already
+       meet it. Previously these rendered ~36px tall. border-box keeps the visible
+       height at exactly 44px including the 6px vertical padding and 1px borders
+       (rather than 44px + padding + border), so the target is met at every
+       breakpoint without changing the input's box model elsewhere. */
+    min-height: 44px;
+    box-sizing: border-box;
 }
 
 /* Keep operand digits aligned with monospaced numerals. */
@@ -164,7 +184,17 @@ button {
     border: 1px solid #cccccc;
     border-radius: 6px;
     font-variant-numeric: tabular-nums;
-    overflow-wrap: anywhere;
+    /* F-UI-01: the result box fills the fixed-width controls column (border-box
+       so the 12px horizontal padding + 1px borders stay inside 100%) and never
+       drives the column wider. Long numeric results (e.g. √2) stay on ONE line
+       and scroll horizontally within the box instead of wrapping to a second
+       line — this keeps the result region's height stable (no vertical jump that
+       pushed the history panel below the fold on narrow screens) and keeps the
+       history panel's x-position fixed on desktop/tablet. */
+    box-sizing: border-box;
+    width: 100%;
+    white-space: nowrap;
+    overflow-x: auto;
 }
 
 /* Error / validation text: a clear danger colour with a reserved min-height so the layout does not jump when a message appears or is cleared. */
@@ -174,6 +204,15 @@ button {
     font-size: 0.9rem;
     min-height: 1.2rem;
     line-height: 1.2rem;
+    /* F-UI-01: the error region fills the fixed-width controls column and wraps
+       long messages onto additional lines WITHIN the column (border-box keeps
+       any future padding inside 100%). Previously a long error string could
+       stretch the column's min-content width and shove the history panel
+       sideways; constraining width + wrapping keeps the calculator/history
+       geometry stable while the message stays fully readable. */
+    box-sizing: border-box;
+    width: 100%;
+    overflow-wrap: anywhere;
 }
 
 /* History panel: visually separated from the controls via a left border and padding so it reads as a distinct region. */
@@ -270,6 +309,12 @@ button {
     }
 
     .calc-controls {
+        /* F-UI-01: reset the desktop `flex: 0 0 280px` here. Below 600px the
+           .calculator switches to `flex-direction: column`, so the flex BASIS
+           now applies to the main (vertical) axis; leaving it at 280px would
+           wrongly fix the controls' HEIGHT. `flex: 0 1 auto` restores
+           content-based height while `width: 100%` fills the stacked column. */
+        flex: 0 1 auto;
         min-width: 0;
         width: 100%;
     }
