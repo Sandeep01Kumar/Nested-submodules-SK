@@ -1,4 +1,342 @@
+/* F10: baseline typography on <body> so ALL page text — including the <h1>
+   heading, which sits outside .calculator — uses the app's sans-serif stack
+   instead of the browser default serif (Times). The stack mirrors .calculator
+   for a consistent look. Hand-authored, framework-free (zero third-party deps). */
+body {
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    color: #212121;
+}
+
+/* Form controls (buttons, inputs) do NOT inherit font-family from their ancestors
+   by default — the user agent gives them a platform default (e.g. Arial), which reads
+   as a different typeface from the app's system-ui stack set on <body>/.calculator
+   (INFO#2 visual-cohesion finding). `font-family: inherit` ties every button (operator
+   keypad, =, Clear History) to that surrounding stack. font-family ONLY — never the
+   `font` shorthand — so the explicit font-size/font-weight on .op-btn/#equals/#clear-history
+   are preserved. */
 button {
     width:50px;
     height:40px;
+    font-family: inherit;
+}
+
+/* Calculator layout: controls on the left, history panel on the right, with clear visual separation. Hand-authored, framework-free CSS (zero third-party deps). */
+.calculator {
+    display: flex;
+    gap: 24px;
+    align-items: flex-start;
+    padding: 16px;
+    font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+    color: #212121;
+}
+
+/* Left column: operand inputs, operator keypad, result and error text. */
+.calc-controls {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+    /* F-UI-01: lock the controls column to a STABLE width so long results/errors
+       wrap or scroll WITHIN it instead of widening the column and pushing the
+       history panel sideways. As a flex item, .calc-controls previously had an
+       automatic min-width of min-content; a long numeric result (e.g. √2 =
+       1.4142135623730951) therefore expanded the column (~273px -> ~346px on
+       desktop) and shifted the history panel's x-position. `flex: 0 0 280px`
+       fixes the basis (no grow, no shrink), and `min-width: 0` removes the
+       min-content floor so children must fit/scroll/wrap inside the fixed width.
+       280px comfortably fits the 4x50 operator grid (218px) and the operand row
+       (210px). The mobile @media block below resets this basis because the
+       .calculator switches to a column flex direction there. */
+    flex: 0 0 280px;
+    min-width: 0;
+}
+
+/* Operand input row. */
+.operands {
+    display: flex;
+    gap: 10px;
+}
+
+.operands input {
+    width: 100px;
+    padding: 6px 8px;
+    font-size: 1rem;
+    /* Inherit the app's system-ui stack rather than the UA default (INFO#2);
+       font-family only, so the explicit font-size above is preserved. */
+    font-family: inherit;
+    border: 1px solid #cccccc;
+    border-radius: 4px;
+    /* F-UI-03: raise the operand inputs to the >= 44x44 interactive target size
+       (WCAG 2.5.5 / 2.5.8), matching the operator/=/Clear buttons which already
+       meet it. Previously these rendered ~36px tall. border-box keeps the visible
+       height at exactly 44px including the 6px vertical padding and 1px borders
+       (rather than 44px + padding + border), so the target is met at every
+       breakpoint without changing the input's box model elsewhere. */
+    min-height: 44px;
+    box-sizing: border-box;
+}
+
+/* Keep operand digits aligned with monospaced numerals. */
+#operand-a,
+#operand-b {
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+}
+
+/* Operator keypad: a tidy fixed-width grid so operator buttons line up neatly and wrap. */
+.operators {
+    display: grid;
+    grid-template-columns: repeat(4, 50px);
+    gap: 6px;
+}
+
+/* Base operator button affordance. The base `button` rule above sets 50x40; here
+   we raise the interactive target to at least 44x44 (WCAG 2.5.5 / 2.5.8 target size). */
+.op-btn {
+    cursor: pointer;
+    border: 1px solid #cccccc;
+    border-radius: 4px;
+    background: #f5f5f5;
+    font-size: 1rem;
+    min-width: 44px;
+    min-height: 44px;
+}
+
+.op-btn:hover {
+    background: #eeeeee;
+}
+
+/* The chosen operator is highlighted with a distinct background and contrasting text. */
+.op-btn.selected {
+    background: #1976d2;
+    color: #ffffff;
+    border-color: #1976d2;
+}
+
+/* Equals button: a subtle accent to distinguish the compute action. */
+#equals {
+    cursor: pointer;
+    background: #2e7d32;
+    color: #ffffff;
+    border: 1px solid #2e7d32;
+    border-radius: 4px;
+    font-weight: 700;
+    min-width: 44px;
+    min-height: 44px;
+}
+
+#equals:hover {
+    background: #276b2b;
+}
+
+/* ===== Interactive states (accessibility): a high-contrast focus ring, a
+   pressed (:active) treatment, and a disabled treatment for every actionable
+   button. The focus ring is offset so it renders on the page background (clearly
+   >= 3:1 non-text contrast, WCAG 1.4.11) regardless of the button's own colour. */
+.op-btn:focus-visible,
+#equals:focus-visible,
+#clear-history:focus-visible {
+    outline: 3px solid #0b57d0;
+    outline-offset: 2px;
+}
+
+.op-btn:active {
+    background: #d9d9d9;
+}
+
+/* When the CURRENTLY-SELECTED operator button is ALSO being pressed, the
+   equal-specificity `.op-btn:active` rule (light #d9d9d9 background) would
+   otherwise combine with the selected state's white text (#ffffff) — measuring
+   only ~1.41:1 and failing WCAG 1.4.3 (contrast minimum). This more-specific
+   rule ((0,3,0) beats the (0,2,0) of both `.op-btn:active` and
+   `.op-btn.selected`) keeps a DARK (darker-blue) background so the white
+   selected-state text stays high-contrast (#ffffff on #14549b ≈ 7.58:1, well
+   above the 4.5:1 AA minimum) while still giving a clear pressed treatment. */
+.op-btn.selected:active {
+    background: #14549b;
+    color: #ffffff;
+    border-color: #14549b;
+}
+
+#equals:active {
+    background: #1f5122;
+}
+
+#clear-history:active {
+    background: #d9d9d9;
+}
+
+.op-btn:disabled,
+#equals:disabled,
+#clear-history:disabled {
+    opacity: 0.5;
+    cursor: not-allowed;
+}
+
+/* Emphasized result display: large, bold, right-aligned, boxed, with a reserved min-height so it never collapses when empty. */
+#result,
+.result {
+    font-size: 2rem;
+    font-weight: 700;
+    text-align: right;
+    padding: 8px 12px;
+    min-height: 2.5rem;
+    background: #fafafa;
+    border: 1px solid #cccccc;
+    border-radius: 6px;
+    font-variant-numeric: tabular-nums;
+    /* F-UI-01: the result box fills the fixed-width controls column (border-box
+       so the 12px horizontal padding + 1px borders stay inside 100%) and never
+       drives the column wider. Long numeric results (e.g. √2) stay on ONE line
+       and scroll horizontally within the box instead of wrapping to a second
+       line — this keeps the result region's height stable (no vertical jump that
+       pushed the history panel below the fold on narrow screens) and keeps the
+       history panel's x-position fixed on desktop/tablet. */
+    box-sizing: border-box;
+    width: 100%;
+    white-space: nowrap;
+    overflow-x: auto;
+}
+
+/* Error / validation text: a clear danger colour with a reserved min-height so the layout does not jump when a message appears or is cleared. */
+#error,
+.error {
+    color: #c62828;
+    font-size: 0.9rem;
+    min-height: 1.2rem;
+    line-height: 1.2rem;
+    /* F-UI-01: the error region fills the fixed-width controls column and wraps
+       long messages onto additional lines WITHIN the column (border-box keeps
+       any future padding inside 100%). Previously a long error string could
+       stretch the column's min-content width and shove the history panel
+       sideways; constraining width + wrapping keeps the calculator/history
+       geometry stable while the message stays fully readable. */
+    box-sizing: border-box;
+    width: 100%;
+    overflow-wrap: anywhere;
+}
+
+/* History panel: visually separated from the controls via a left border and padding so it reads as a distinct region. */
+.history-panel {
+    min-width: 220px;
+    padding-left: 16px;
+    border-left: 2px solid #e0e0e0;
+    background: #ffffff;
+}
+
+.history-header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 4px;
+}
+
+/* Normalize the History panel heading (F8 promoted it h3 -> h2): drop the large
+   default h2 margins/size so it sits neatly in the flex header row and stays
+   visually consistent with the compact panel, without a size jump. */
+.history-header h2 {
+    margin: 0;
+    font-size: 1.2rem;
+}
+
+/* Override the 50x40 base `button` size so the wide "Clear History" label fits,
+   while still meeting the >= 44px accessible target size (WCAG 2.5.5 / 2.5.8). */
+#clear-history {
+    width: auto;
+    height: auto;
+    min-width: 44px;
+    min-height: 44px;
+    padding: 6px 10px;
+    cursor: pointer;
+    border: 1px solid #cccccc;
+    border-radius: 4px;
+    background: #f5f5f5;
+    font-size: 0.85rem;
+}
+
+#clear-history:hover {
+    background: #eeeeee;
+}
+
+/* Scrollable history list: clean (no bullets/indent) with a bounded height so long histories scroll instead of growing. */
+#history-list,
+.history-list {
+    list-style: none;
+    margin: 8px 0 0;
+    padding: 0;
+    max-height: 240px;
+    overflow-y: auto;
+}
+
+/* Each entry lays the expression and its timestamp on one row, separated by a subtle divider. */
+.history-item {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 4px 0;
+    border-bottom: 1px solid #f0f0f0;
+}
+
+.history-item:last-child {
+    border-bottom: none;
+}
+
+/* Expression text, kept in tabular numerals for alignment. */
+.history-expr {
+    font-variant-numeric: tabular-nums;
+    overflow-wrap: anywhere;
+}
+
+/* Muted / de-emphasized timestamps: smaller and lower-contrast so they sit
+   visually behind the expression, while still meeting the WCAG 2.1 AA normal-text
+   contrast minimum of 4.5:1 on white (#6b6b6b on #ffffff measures ~5.33:1). */
+.history-time {
+    color: #6b6b6b;
+    font-size: 0.8rem;
+    white-space: nowrap;
+}
+
+/* ===== Responsive: on narrow viewports (phones, small tablets) the two-column
+   controls + history row has an intrinsic width of ~534px and would otherwise
+   overflow common 320-375px screens. Below 600px: stack the two columns, replace
+   the vertical divider with a horizontal one, release the fixed minimum widths,
+   and let the inputs and operator grid fill the available width. ===== */
+@media (max-width: 600px) {
+    .calculator {
+        flex-direction: column;
+        gap: 16px;
+    }
+
+    .calc-controls {
+        /* F-UI-01: reset the desktop `flex: 0 0 280px` here. Below 600px the
+           .calculator switches to `flex-direction: column`, so the flex BASIS
+           now applies to the main (vertical) axis; leaving it at 280px would
+           wrongly fix the controls' HEIGHT. `flex: 0 1 auto` restores
+           content-based height while `width: 100%` fills the stacked column. */
+        flex: 0 1 auto;
+        min-width: 0;
+        width: 100%;
+    }
+
+    .operands {
+        flex-wrap: wrap;
+    }
+
+    .operands input {
+        width: 100%;
+    }
+
+    .operators {
+        grid-template-columns: repeat(4, minmax(44px, 1fr));
+    }
+
+    .history-panel {
+        min-width: 0;
+        width: 100%;
+        padding-left: 0;
+        border-left: none;
+        padding-top: 16px;
+        border-top: 2px solid #e0e0e0;
+    }
 }

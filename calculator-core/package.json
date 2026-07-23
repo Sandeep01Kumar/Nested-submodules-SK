@@ -1,0 +1,10 @@
+{
+    "name": "calculator-core",
+    "version": "1.0.0",
+    "private": true,
+    "main": "index.js",
+    "description": "calculator-core: math-engine operations facade (calculator.js) and in-memory calculation-history API (history.js). Zero third-party dependencies (constraint C-001); tests use only Node's built-in node:test/node:assert. 'main' points at index.js so the mandated 'node --test calculator-core/' command resolves the directory to the test entry point and runs the full suite (see index.js).",
+    "scripts": {
+        "test": "node --test"
+    }
+}

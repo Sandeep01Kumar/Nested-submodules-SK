@@ -1,13 +1,159 @@
-<html>
+<!doctype html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <!-- F-UI-04: a concise page description so basic SEO metadata is complete
+         (Lighthouse "meta-description" audit). Zero external assets; preserves
+         the C-001 zero-dependency posture. -->
+    <meta name="description" content="A simple, zero-dependency calculator with add, subtract, multiply, divide, modulus, power, and square-root operations, plus a timestamped calculation history.">
+    <title>Calculator</title>
+    <!-- C-005: wire the sibling stylesheet (the original inert page loaded neither
+         style.css nor app.js). style.css is a sibling of this file. -->
+    <link rel="stylesheet" href="style.css">
+    <!-- F9: declare an inline empty icon so the browser does not request
+         /favicon.ico (which 404s on this static, zero-dependency site). The
+         data: URI ships no external asset and keeps the C-001 posture. -->
+    <link rel="icon" href="data:,">
+</head>
 <body>
-<h2>Calculator</h2>
+    <!-- F8: the page's single top-level heading (was <h2> with no <h1>). It also
+         names the <main> landmark below via aria-labelledby. -->
+    <h1 id="app-title">Calculator</h1>
 
-<input id="display">
+    <!-- F8: wrap the primary content in a labelled <main> landmark so assistive
+         technology can jump straight to the calculator. Layout: controls on the
+         left, calculation-history panel on the right. All ids/classes below form
+         the shared DOM contract that app.js selects and style.css styles; they
+         must not be renamed. -->
+    <main aria-labelledby="app-title">
+    <div class="calculator">
+        <section class="calc-controls">
+            <div class="operands">
+                <!-- F-UI-02: step="any" lets the native number input accept
+                     finite decimals (e.g. 2.5, 0.1) and exponent notation without
+                     reporting a spurious stepMismatch / :invalid. Without it the
+                     input defaults to step=1, so any non-integer the app computes
+                     correctly was still flagged natively invalid. -->
+                <label>a <input id="operand-a" type="number" inputmode="decimal" step="any" placeholder="0"></label>
+                <label>b <input id="operand-b" type="number" inputmode="decimal" step="any" placeholder="0"></label>
+            </div>
 
-<button>1</button>
-<button>2</button>
-<button>+</button>
-<button>=</button>
+            <!-- Operator keypad. Each button carries the CANONICAL calculator-core
+                 dispatch symbol in data-op (+, -, *, /, %, ^, √); the visible glyph
+                 may be prettified (−, ×, ÷) but data-op stays canonical. %, ^ and √
+                 are the new operations added by this feature. √ is unary, so app.js
+                 disables #operand-b when it is selected. aria-label gives each
+                 symbol-only control a descriptive accessible name. -->
+            <div id="operators" class="operators" role="group" aria-label="Operators">
+                <button class="op-btn" data-op="+" type="button" aria-label="Add">+</button>
+                <button class="op-btn" data-op="-" type="button" aria-label="Subtract">−</button>
+                <button class="op-btn" data-op="*" type="button" aria-label="Multiply">×</button>
+                <button class="op-btn" data-op="/" type="button" aria-label="Divide">÷</button>
+                <button class="op-btn" data-op="%" type="button" aria-label="Modulus">%</button>
+                <button class="op-btn" data-op="^" type="button" aria-label="Power">^</button>
+                <button class="op-btn" data-op="√" type="button" aria-label="Square root">√</button>
+            </div>
 
+            <button id="equals" type="button" aria-label="Equals">=</button>
+
+            <!-- F8: the result is a named live status region (role="status"
+                 announces changes politely to assistive tech). Starts at 0. -->
+            <div id="result" class="result" role="status" aria-label="Result" aria-live="polite">0</div>
+            <!-- Validation / computation errors surface here (role=alert), never
+                 only in the console. -->
+            <div id="error" class="error" role="alert" aria-live="polite"></div>
+        </section>
+
+        <aside class="history-panel">
+            <div class="history-header">
+                <!-- F8: h2 (was h3) keeps a clean h1 -> h2 heading hierarchy under
+                     the page's single <h1>, avoiding a skipped heading level. -->
+                <h2>History</h2>
+                <button id="clear-history" type="button">Clear History</button>
+            </div>
+            <!-- app.js fills this list newest-first with one .history-item per
+                 recorded calculation (expression = result + timestamp). -->
+            <ul id="history-list" class="history-list"></ul>
+        </aside>
+    </div>
+    </main>
+
+    <!-- ===== calculator-core integration bridge (C-002): zero-dependency, no bundler, classic scripts =====
+         The sibling calculator-core files are CommonJS + UMD-with-browser-globals, NOT ES modules, so we
+         consume them via ordered CLASSIC <script> tags (never ES modules; no module-type scripts, no import). Order is load-bearing:
+         classic scripts run top-to-bottom, synchronously, so every global exists before app.js runs. -->
+
+    <!-- 1) Provide a throwaway CommonJS `module` shim so the pure-CommonJS math-engine
+            files (each ends in `module.exports = fn;`) can run in the browser, create
+            the window.mathEngine namespace the calculator-core facade reads from, and
+            install a FAIL-CLOSED capture helper.
+
+            F1 (fail-closed capture): a UNIQUE sentinel is written to module.exports
+            BEFORE every operation script. Each op file overwrites module.exports with
+            its function; __captureOp then copies it into window.mathEngine ONLY when
+            the value is a fresh callable (a function that is NOT the sentinel), and
+            immediately RE-ARMS the sentinel for the next op. If an operation script
+            fails to load (404 / blocked / parse error), module.exports is never
+            overwritten, so it is still the sentinel: __captureOp captures NOTHING and
+            leaves that operation key ABSENT. calculator.js then fails CLOSED with a
+            structured ERR_DEPENDENCY at init instead of silently reusing the PREVIOUS
+            operation's function (which previously made `%` compute division). -->
+    <script>
+        window.mathEngine = {};
+        window.module = { exports: {} };
+        // A unique, private sentinel meaning "no operation export was produced".
+        // Object identity (not a value like undefined) makes the check unforgeable.
+        window.__mathEngineUnloaded = { calculatorBridgeSentinel: true };
+        window.module.exports = window.__mathEngineUnloaded;
+        window.__captureOp = function (name) {
+            var ex = window.module.exports;
+            // Capture ONLY a freshly-exported callable — never the sentinel (the
+            // script did not run) and never a stale non-function value.
+            if (ex !== window.__mathEngineUnloaded && typeof ex === 'function') {
+                window.mathEngine[name] = ex;
+            }
+            // Re-arm the sentinel so the NEXT operation starts from a known
+            // "unloaded" state and can never inherit this operation's export.
+            window.module.exports = window.__mathEngineUnloaded;
+        };
+    </script>
+
+    <!-- 2) Load each pure-CommonJS math-engine operation, then capture its export via
+            __captureOp (which re-arms the sentinel after each). A missing script leaves
+            its key absent (fail closed) rather than reusing the previous export. -->
+    <script src="../calculator-core/math-engine/add.js"></script>
+    <script>window.__captureOp('add');</script>
+    <script src="../calculator-core/math-engine/subtract.js"></script>
+    <script>window.__captureOp('subtract');</script>
+    <script src="../calculator-core/math-engine/multiply.js"></script>
+    <script>window.__captureOp('multiply');</script>
+    <script src="../calculator-core/math-engine/divide.js"></script>
+    <script>window.__captureOp('divide');</script>
+    <script src="../calculator-core/math-engine/modulus.js"></script>
+    <script>window.__captureOp('modulus');</script>
+    <script src="../calculator-core/math-engine/power.js"></script>
+    <script>window.__captureOp('power');</script>
+    <script src="../calculator-core/math-engine/sqrt.js"></script>
+    <script>window.__captureOp('sqrt');</script>
+
+    <!-- 3) CRITICAL: clear the CommonJS shim (and the bridge-only helper globals) so
+            the UMD files below take their BROWSER (else) branch. If window.module
+            stays defined, history.js/calculator.js would detect Node
+            (typeof module === 'object' && module.exports) and would NOT register
+            window.calculatorHistory / window.calculatorCore — silently breaking the
+            whole UI. -->
+    <script>window.module = undefined; window.__captureOp = undefined; window.__mathEngineUnloaded = undefined;</script>
+
+    <!-- 4) history.js self-registers window.calculatorHistory (UMD browser branch). -->
+    <script src="../calculator-core/history.js"></script>
+
+    <!-- 5) calculator.js reads window.mathEngine + window.calculatorHistory and
+            registers window.calculatorCore. -->
+    <script src="../calculator-core/calculator.js"></script>
+
+    <!-- 6) app.js: the UI controller (classic script). Runs last so window.calculatorCore
+            is already available. MUST be a classic script, never an ES module. -->
+    <script src="app.js"></script>
 </body>
 </html>
